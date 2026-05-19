@@ -71,3 +71,14 @@ bot.launch()
 // Мягкая остановка при выключении сервера
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
+import http from 'http';
+
+// Обманка для хостинга Render, чтобы он не ругался на отсутствие открытого порта
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('Bot is running alive!');
+}).listen(PORT, () => {
+  console.log(`Fake web-server is listening on port ${PORT}`);
+});
