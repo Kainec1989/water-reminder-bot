@@ -1,83 +1,90 @@
 # 💧 Water Reminder Telegram Bot
 
-A lightweight, production-ready Node.js Telegram bot designed to help users maintain their daily hydration goals. It automatically sends a reminder to drink a glass of water every hour between **9:00 AM and 9:00 PM (Europe/Berlin timezone)**.
+A lightweight Node.js Telegram bot that reminds you to drink water every hour between **9:00 and 21:00 (Europe/Berlin)**.
 
-This project features native internationalization (i18n) and active countdown timers, tailored for clean architecture and rapid cloud deployment.
-
----
-
-## 🚀 Key Features
-
-* **Automated Hourly Scheduling:** Uses `node-cron` to trigger reminders strictly at the top of every hour within the active window (09:00 - 21:00).
-* **Native Internationalization (i18n):** Automatically detects the user's Telegram interface language and responds instantly in **German (DE)**, **Russian (RU)**, or **English (EN)** (default fallback).
-* **Dynamic Countdown Timer:** Includes a custom `/next` command that calculates and displays the exact hours and minutes remaining until the next scheduled reminder.
-* **Smart State Management:** Tracks active subscribers and their language preferences using an in-memory `Map` with automatic memory cleanup for blocked or inactive chats.
-* **Graceful Shutdown Protocols:** Properly handles `SIGINT` and `SIGTERM` system signals to terminate the Telegram polling connection safely without interrupting active cycles.
-* **Production-Ready Security:** Sensitive API credentials are completely isolated using environment variables (`.env`) and explicitly secured via `.gitignore`.
+Features i18n (DE / RU / EN), a `/next` countdown, JSON persistence for subscribers, and deployment on Render without Linux `tzdata` in the container.
 
 ---
 
-## 🛠️ Tech Stack
+## Key features
 
-* **Runtime Environment:** Node.js (v18+, modern ES Modules syntax)
-* **Telegram API Framework:** [Telegraf.js](https://github.com/telegraf/telegraf) (Modern, robust Telegram Bot API wrapper)
-* **Task Scheduler:** [node-cron](https://github.com/node-cron/node-cron) (Pure JavaScript tiny cron-like job scheduler)
-* **Configuration Management:** [dotenv](https://github.com/motdotla/dotenv) (Loads environment variables from `.env`)
-
----
-
-## 📦 Architecture & Workflow
-
-The bot architecture follows clean engineering principles, isolating core localization and subscription maps from the automated scheduling system. This makes it scalable and ready to plug in a persistent database layer (e.g., MongoDB/Mongoose) later:
-
-1. **Subscription & Language Detection Layer:** When a user sends `/start`, the bot extracts their unique `chatId` and processes their metadata (`from.language_code`) to map their preferred language.
-2. **Cron Scheduler Layer:** The background daemon constantly evaluates the time rule `0 9-21 * * *` against the target timezone (`Europe/Berlin`).
-3. **Execution Layer:** At the exact minute mark, the bot iterates over active subscribers from the map and dispatches localized Telegram messages asynchronously using robust error handling.
+* **Hourly reminders (Berlin time):** Cron runs on UTC; each tick checks the current hour in `Europe/Berlin` via `Intl` and sends only between 09:00–21:00 (works in winter CET and summer CEST).
+* **i18n:** Detects Telegram `language_code` (with locale prefixes and `uk` → `ru`).
+* **`/next`:** Countdown to the next reminder in the user’s language.
+* **Persistent subscribers:** `data/subscribers.json` survives process restarts (optional `DATA_DIR` on Render disk).
+* **Graceful shutdown:** Stops cron, flushes subscribers to disk, closes HTTP, stops Telegraf.
 
 ---
 
-## 💻 Local Setup & Installation
+## Scheduling (how it works)
 
-### Prerequisite
-Make sure you have Node.js (v18+) installed locally and a secure Telegram Bot token generated via @BotFather.
+| Layer | Mechanism |
+|--------|-----------|
+| **Cron** | `0 6-21 * * *` in **UTC** (no `timezone` option — avoids silent failures without `tzdata` on Render) |
+| **Gate** | Before sending, `Intl` checks Berlin local hour is **9–21** |
+| **`/next`** | Same Berlin clock via `Intl` |
 
-1. **Clone the repository:**
+This keeps reminders aligned with `/next` year-round without `node-cron` timezone support.
+
+---
+
+## Environment variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `BOT_TOKEN` | yes | — | Telegram bot token from [@BotFather](https://t.me/BotFather) |
+| `PORT` | no | `3000` | HTTP health check (Render sets this automatically) |
+| `DATA_DIR` | no | `./data` | Directory for `subscribers.json` |
+
+---
+
+## Local setup
+
+1. **Clone and install**
+   ```bash
    git clone https://github.com/YOUR_USERNAME/water-reminder-bot.git
    cd water-reminder-bot
+   npm install
+   ```
 
-2. **Install project dependencies:**
-   npm install telegraf node-cron dotenv
-
-3. **Configure Environment Variables:**
-   Create a `.env` file in the root directory:
+2. **Configure `.env`**
+   ```
    BOT_TOKEN=your_secret_telegram_bot_token_here
+   ```
 
-4. **Verify Modern Syntax Configuration:**
-   Ensure your `package.json` includes the following line right below your entry point to enable ES Modules:
-   "type": "module"
+3. **Run**
+   ```bash
+   npm start
+   ```
 
-5. **Start the bot locally:**
-   node index.js
-
----
-
-## ☁️ Deployment Guide (Render / Railway)
-
-This bot is fully optimized to run 24/7 as a background worker or non-sleeping web service in the cloud.
-
-1. **Push to GitHub:** Push your codebase to a public or private GitHub repository. Ensure that your `.env` file is successfully ignored by checking your `.gitignore` rules.
-2. **Connect to Hosting:** Log in to Render.com or Railway using your GitHub account credentials.
-3. **Create Service:** Create a new Web Service or Background Worker and link it to the `water-reminder-bot` repository.
-4. **Define Build Settings:** Enter the following parameters during the setup wizard:
-   * Runtime: Node
-   * Build Command: npm install
-   * Start Command: node index.js
-5. **Inject Secrets:** Head over to the Environment Variables tab, click Add Variable, and paste your token:
-   * Key: BOT_TOKEN
-   * Value: [Your actual secret token string from BotFather]
-6. **Trigger Deploy:** Click Deploy Web Service. The platform will automatically spin up your instance, install dependencies, inject the credentials, and execute the server.
+Subscribers are stored in `data/subscribers.json` (gitignored).
 
 ---
 
-## 📜 License
-This project is licensed under the MIT License. Feel free to use, fork, modify, or bundle this code for your personal usage, tutorials, or portfolio presentations.
+## Deploy on Render
+
+1. Push to GitHub (`.env` must stay out of the repo).
+2. Create a **Web Service**, connect the repo.
+3. **Build:** `npm install` · **Start:** `npm start`
+4. Add `BOT_TOKEN` in Environment.
+5. **Optional — keep subscribers across redeploys:** add a [Persistent Disk](https://render.com/docs/disks), mount e.g. at `/data`, set `DATA_DIR=/data`.
+
+Without a disk, subscribers survive **restarts** of the same instance but are lost on **new deploys** (ephemeral filesystem).
+
+Do **not** use `node-cron` `{ timezone: "Europe/Berlin" }` on minimal Docker images unless `tzdata` is installed — the job may never run.
+
+---
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `/start` | Subscribe to hourly reminders |
+| `/stop` | Unsubscribe |
+| `/next` | Time until next reminder (subscribers only) |
+
+---
+
+## License
+
+MIT

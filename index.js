@@ -2,6 +2,7 @@ import { Telegraf } from 'telegraf';
 import cron from 'node-cron';
 import dotenv from 'dotenv';
 import http from 'http';
+import { loadSubscribers, saveSubscribers, getStorePath } from './storage.js';
 
 dotenv.config();
 
@@ -11,8 +12,10 @@ if (!process.env.BOT_TOKEN) {
 }
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
-const activeUsers = new Map(); // chatId -> languageCode
+const activeUsers = await loadSubscribers();
 const TIMEZONE = 'Europe/Berlin';
+const REMINDER_HOUR_START = 9;
+const REMINDER_HOUR_END = 21;
 
 const LANG_ALIASES = { uk: 'ru' };
 
@@ -22,7 +25,6 @@ const REMOVE_CHAT_ERRORS = [
   'user is deactivated',
 ];
 
-// Словари с переводами
 const i18n = {
   ru: {
     start: 'Привет! 💧 Я твой водный баланс-тренер. Каждый час с 9:00 до 21:00 я буду напоминать тебе выпить стакан воды.\n\n👉 Напиши /next, чтобы узнать, сколько времени осталось до следующего стакана!',
@@ -56,6 +58,24 @@ const i18n = {
   },
 };
 
+async function persistSubscribers() {
+  try {
+    await saveSubscribers(activeUsers);
+  } catch (err) {
+    console.error('Failed to save subscribers:', err.message);
+  }
+}
+
+async function subscribeUser(chatId, lang) {
+  activeUsers.set(chatId, lang);
+  await persistSubscribers();
+}
+
+async function unsubscribeUser(chatId) {
+  if (!activeUsers.delete(chatId)) return;
+  await persistSubscribers();
+}
+
 function formatMsg(lang, key, vars = {}) {
   let text = i18n[lang][key];
   for (const [name, value] of Object.entries(vars)) {
@@ -64,7 +84,6 @@ function formatMsg(lang, key, vars = {}) {
   return text;
 }
 
-// Язык по коду Telegram (дефолт — английский)
 function getLanguage(ctx) {
   const raw = ctx.from?.language_code?.toLowerCase();
   if (!raw) return 'en';
@@ -92,14 +111,19 @@ function getBerlinTime() {
   return { hour, minute };
 }
 
+function isBerlinReminderWindow() {
+  const { hour } = getBerlinTime();
+  return hour >= REMINDER_HOUR_START && hour <= REMINDER_HOUR_END;
+}
+
 function getTargetTimeDiff() {
   const { hour, minute } = getBerlinTime();
   let targetHour;
 
-  if (hour < 9) {
-    targetHour = 9;
-  } else if (hour >= 21) {
-    targetHour = 9 + 24;
+  if (hour < REMINDER_HOUR_START) {
+    targetHour = REMINDER_HOUR_START;
+  } else if (hour >= REMINDER_HOUR_END) {
+    targetHour = REMINDER_HOUR_START + 24;
   } else {
     targetHour = hour + 1;
   }
@@ -117,14 +141,14 @@ function getTargetTimeDiff() {
   return { hoursLeft, minutesLeft, targetTimeStr: formattedTargetTime };
 }
 
-bot.start((ctx) => {
+bot.start(async (ctx) => {
   const chatId = ctx.chat.id;
   const lang = getLanguage(ctx);
 
-  activeUsers.set(chatId, lang);
+  await subscribeUser(chatId, lang);
 
   ctx.reply(i18n[lang].start);
-  console.log(`Пользователь ${chatId} подписался. Язык: ${lang}`);
+  console.log(`User ${chatId} subscribed. Language: ${lang}`);
 });
 
 bot.command('next', (ctx) => {
@@ -152,13 +176,13 @@ bot.command('next', (ctx) => {
   ctx.reply(responseMsg, { parse_mode: 'Markdown' });
 });
 
-bot.command('stop', (ctx) => {
+bot.command('stop', async (ctx) => {
   const chatId = ctx.chat.id;
   const lang = getUserLang(chatId, ctx);
 
-  activeUsers.delete(chatId);
+  await unsubscribeUser(chatId);
   ctx.reply(i18n[lang].stop);
-  console.log(`Пользователь ${chatId} отписался.`);
+  console.log(`User ${chatId} unsubscribed.`);
 });
 
 const sendWaterReminder = () => {
@@ -167,10 +191,10 @@ const sendWaterReminder = () => {
   for (const [chatId, lang] of activeUsers.entries()) {
     const text = i18n[lang].reminder;
 
-    bot.telegram.sendMessage(chatId, text).catch((err) => {
+    bot.telegram.sendMessage(chatId, text).catch(async (err) => {
       const desc = err.description ?? '';
       if (REMOVE_CHAT_ERRORS.some((e) => desc.includes(e))) {
-        activeUsers.delete(chatId);
+        await unsubscribeUser(chatId);
         console.log(`Removed ${chatId}: ${desc}`);
       } else {
         console.error(`Failed to send to ${chatId}:`, desc || err.message);
@@ -179,14 +203,23 @@ const sendWaterReminder = () => {
   }
 };
 
-const reminderJob = cron.schedule(
-  '0 9-21 * * *',
-  () => {
-    console.log('Cron fired (Europe/Berlin). Sending reminders...');
-    sendWaterReminder();
-  },
-  { timezone: TIMEZONE },
-);
+// node-cron `timezone` needs tzdata (often missing on Render). Cron runs in UTC;
+// we only send when Berlin local hour is 9–21 (works in CET and CEST).
+const onCronTick = () => {
+  const { hour, minute } = getBerlinTime();
+  if (!isBerlinReminderWindow()) {
+    console.log(
+      `Cron tick skipped (Berlin ${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')} outside 9–21).`,
+    );
+    return;
+  }
+  console.log(
+    `Cron tick: Berlin ${String(hour).padStart(2, '0')}:00, sending reminders to ${activeUsers.size} users.`,
+  );
+  sendWaterReminder();
+};
+
+const reminderJob = cron.schedule('0 6-21 * * *', onCronTick);
 
 const PORT = process.env.PORT || 3000;
 const server = http.createServer((req, res) => {
@@ -201,12 +234,19 @@ server.listen(PORT, () => {
 const shutdown = async (signal) => {
   console.log(`Received ${signal}, shutting down...`);
   reminderJob.stop();
+  await persistSubscribers();
   await new Promise((resolve) => server.close(resolve));
-  await bot.stop(signal);
+  try {
+    await bot.stop(signal);
+  } catch (err) {
+    console.error('bot.stop failed:', err.message);
+  }
   process.exit(0);
 };
 
 process.once('SIGINT', () => shutdown('SIGINT'));
 process.once('SIGTERM', () => shutdown('SIGTERM'));
 
-bot.launch().then(() => console.log('🚀 Бот запущен с поддержкой мультиязычности!'));
+bot.launch().then(() => {
+  console.log(`Bot started. ${activeUsers.size} subscribers loaded from ${getStorePath()}`);
+});
