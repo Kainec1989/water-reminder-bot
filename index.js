@@ -1,6 +1,7 @@
 import { Telegraf } from 'telegraf';
 import cron from 'node-cron';
 import dotenv from 'dotenv';
+import http from 'http';
 
 dotenv.config();
 
@@ -10,42 +11,106 @@ if (!process.env.BOT_TOKEN) {
 }
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
-
-// В реальном проекте мы бы юзали MongoDB, но для микро-бота пока сохраним в Set (в оперативку)
 const activeUsers = new Set();
+const TIMEZONE = "Europe/Berlin";
 
-// Команда /start — подписывает пользователя на уведомления
+// Вспомогательная функция для получения текущего времени в часовом поясе Берлина
+function getBerlinTime() {
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: TIMEZONE,
+    hour: 'numeric',
+    minute: 'numeric',
+    second: 'numeric',
+    hour12: false
+  });
+  
+  const parts = formatter.formatToParts(new Date());
+  const timeObj = {};
+  parts.forEach(({ type, value }) => {
+    timeObj[type] = parseInt(value, 10);
+  });
+  
+  return { hour: timeObj.hour, minute: timeObj.minute };
+}
+
+// Функция расчета времени до следующего напоминания
+function getTargetTimeDiff() {
+  const { hour, minute } = getBerlinTime();
+  let targetHour;
+
+  if (hour < 9) {
+    // Если еще нет 9 утра, то ближайшее напоминание будет сегодня в 9:00
+    targetHour = 9;
+  } else if (hour >= 21) {
+    // If it's 21:00 or later, the next reminder is tomorrow at 9:00 AM
+    targetHour = 9 + 24;
+  } else {
+    // В рабочее время (9-20) следующее напоминание — начало следующего часа
+    targetHour = hour + 1;
+  }
+
+  // Считаем общую разницу в минутах
+  const currentTotalMinutes = hour * 60 + minute;
+  const targetTotalMinutes = targetHour * 60; // так как минуты всегда 00
+  
+  const diffMinutes = targetTotalMinutes - currentTotalMinutes;
+  
+  const hoursLeft = Math.floor(diffMinutes / 60);
+  const minutesLeft = diffMinutes % 60;
+
+  // Форматируем красивую строчку целевого часа (без учета +24 для завтрашнего дня)
+  const displayTargetHour = targetHour >= 24 ? targetHour - 24 : targetHour;
+  const formattedTargetTime = `${String(displayTargetHour).padStart(2, '0')}:00`;
+
+  return {
+    hoursLeft,
+    minutesLeft,
+    targetTimeStr: formattedTargetTime
+  };
+}
+
+// Команда /start
 bot.start((ctx) => {
   const chatId = ctx.chat.id;
   activeUsers.add(chatId);
   
   ctx.reply(
-    'Привет! 💧 Я твой водный баланс-тренер. Каждый час с 9:00 до 21:00 я буду напоминать тебе выпить стакан воды.\n\nПервое напоминание прилетит автоматически в ближайший рабочий час!'
+    'Привет! 💧 Я твой водный баланс-тренер. Каждый час с 9:00 до 21:00 я буду напоминать тебе выпить стакан воды.\n\n👉 Напиши /next, чтобы узнать, сколько времени осталось до следующего стакана!'
   );
-  console.log(`Пользователь ${chatId} подписался на уведомления.`);
+  console.log(`Пользователь ${chatId} подписался.`);
 });
 
-// Команда /stop — отписка
+// Новая команда /next — показывает таймер
+bot.command('next', (ctx) => {
+  const { hoursLeft, minutesLeft, targetTimeStr } = getTargetTimeDiff();
+  
+  let countdownStr = '';
+  if (hoursLeft > 0) {
+    countdownStr += `${hoursLeft} ч. `;
+  }
+  countdownStr += `${minutesLeft} мин.`;
+
+  ctx.reply(
+    `⏰ *Следующее напоминание:* в *${targetTimeStr}* (по Берлину).\n\n⏳ *Осталось подождать:* ${countdownStr}`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+// Команда /stop
 bot.command('stop', (ctx) => {
   const chatId = ctx.chat.id;
   activeUsers.delete(chatId);
-  ctx.reply('Напоминания отключены. Если захочешь вернуться, просто нажми /start');
+  ctx.reply('Напоминания отключены. Нажми /start, если захочешь вернуться.');
   console.log(`Пользователь ${chatId} отписался.`);
 });
 
 // Функция рассылки
 const sendWaterReminder = () => {
-  if (activeUsers.size === 0) {
-    console.log('Нет активных пользователей для рассылки.');
-    return;
-  }
+  if (activeUsers.size === 0) return;
 
-  console.log(`Запуск рассылки для ${activeUsers.size} пользователей...`);
   for (const chatId of activeUsers) {
     bot.telegram.sendMessage(chatId, '💧 Время выпить стакан воды! Твоему организму нужна энергия. За здоровье! 🥤')
       .catch((err) => {
-        console.error(`Не удалось отправить сообщение пользователю ${chatId}:`, err);
-        // Если пользователь заблокировал бота, удаляем его из списка
         if (err.description?.includes('bot was blocked by the user')) {
           activeUsers.delete(chatId);
         }
@@ -53,32 +118,24 @@ const sendWaterReminder = () => {
   }
 };
 
-// Настройка Планировщика задач (Cron)
-// Синтаксис: 'минута час день_месяца месяц день_недели'
-// '0 9-21 * * *' означает: Ровно в 0 минут, каждый час с 9 до 21, в любой день.
+// Планировщик задач (Крон)
 cron.schedule('0 9-21 * * *', () => {
   sendWaterReminder();
 }, {
   scheduled: true,
-  timezone: "Europe/Berlin" // Ставим твой часовой пояс, чтобы бот не будил ночью
+  timezone: TIMEZONE
 });
 
-// Запуск бота
-bot.launch()
-  .then(() => console.log('🚀 Бот успешно запущен и следит за твоим водным балансом!'))
-  .catch((err) => console.error('Ошибка запуска бота:', err));
-
-// Мягкая остановка при выключении сервера
+// Мягкая остановка
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+bot.launch().then(() => console.log('🚀 Бот запущен!'));
 
-import http from 'http';
-
-// Обманка для хостинга Render, чтобы он не ругался на отсутствие открытого порта
+// Фейковый сервер для Render (чтобы не падал по Port Binding)
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Bot is running alive!');
 }).listen(PORT, () => {
-  console.log(`Fake web-server is listening on port ${PORT}`);
+  console.log(`Fake web-server listening on port ${PORT}`);
 });
